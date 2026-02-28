@@ -1,0 +1,432 @@
+import os
+import time
+import requests
+import pandas as pd
+import numpy as np
+import joblib
+from sklearn.neighbors import NearestNeighbors
+import lime
+import lime.lime_tabular
+
+# ================= CONFIGURATION =================
+# ⚠️  SECURITY: Use environment variable instead of hardcoding your key.
+# In PowerShell run: $env:OPENROUTER_API_KEY = "sk-or-v1-..."
+# Then the line below picks it up automatically.
+OPENROUTER_API_KEY      = "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"
+LLM_MODEL               = "stepfun/step-3.5-flash:free"
+LLM_MAX_TOKENS          = 800   # increased to handle longer narrative explanations
+LLM_TEMPERATURE         = 0.3
+LLM_RETRY_BASE_DELAY    = 10    # doubles each attempt: 10s, 20s, 40s, 80s, 160s
+LLM_RETRIES             = 5
+LLM_BETWEEN_USERS_DELAY = 5     # pause between users to avoid burst rate-limiting
+
+# ================= LOAD RANDOM FOREST MODEL =================
+model        = joblib.load("random_forest_bot_classifier.pkl")
+feature_list = joblib.load("random_forest_feature_list.pkl")
+ml_cols      = joblib.load("random_forest_ml_feature_cols.pkl")
+
+# ================= LOAD SCALERS =================
+robust_scaler        = joblib.load("robust_scaler.pkl")
+age_scaler           = joblib.load("age_scaler.pkl")
+embedding_normalizer = joblib.load("embedding_normalizer.pkl")
+
+# ================= LOAD DATA =================
+ref_emb       = pd.read_csv("training_embeddings_reference.csv")
+train_tabular = pd.read_csv("training_tabular_reference.csv")
+api_df        = pd.read_excel("api_file.xlsx", dtype={"user_id": str})
+
+rename_map = {f"emb_{i}": str(i) for i in range(64)}
+ref_emb    = ref_emb.rename(columns=rename_map)
+
+# ================= PREPARE NN =================
+emb_cols        = [c for c in ref_emb.columns if c.isdigit()]
+DROP_SIM_COLS   = ["user_id", "user_name", "Label", "dataset"]
+similarity_cols = [c for c in train_tabular.columns if c not in DROP_SIM_COLS]
+
+nn = NearestNeighbors(n_neighbors=10, metric="cosine")
+nn.fit(train_tabular[similarity_cols])
+
+followers_95_quantile = train_tabular["followers_count"].quantile(0.95)
+
+RAW_INPUT_COLS = [c for c in api_df.columns if c not in
+                  ["user_id", "user_name", "Label", "label", "dataset"]]
+
+
+# ================= SHARED PIPELINE FUNCTION =================
+def run_pipeline(row: pd.DataFrame) -> float:
+    row = row.copy()
+    row["account_age_days"] = row["account_age_days"].clip(lower=1.0)
+    row["tweets_count"]     = row["tweets_count"].clip(lower=0.0)
+    row["followers_count"]  = row["followers_count"].clip(lower=0.0)
+
+    row["tweets_per_day"]         = row["tweets_count"]    / row["account_age_days"]
+    row["followers_per_day"]      = row["followers_count"] / row["account_age_days"]
+    row["log_tweets_per_day"]     = np.log1p(row["tweets_per_day"])
+    row["log_followers_per_day"]  = np.log1p(row["followers_per_day"])
+    row["followers_spike"]        = row["followers_count"] / np.sqrt(row["account_age_days"])
+    row["tweet_spike"]            = row["tweets_count"]    / np.sqrt(row["account_age_days"])
+    row["extreme_activity_score"] = row["log_followers_per_day"] + row["log_tweets_per_day"]
+    row["young_account_flag"]     = (row["account_age_days"] < 90).astype(int)
+    row["huge_followers_flag"]    = (row["followers_count"] > followers_95_quantile).astype(int)
+    row["young_and_popular"]      = row["young_account_flag"] * row["huge_followers_flag"]
+
+    for c in similarity_cols:
+        if c not in row.columns:
+            row[c] = 0
+    row[similarity_cols] = row[similarity_cols].replace([np.inf, -np.inf], 0).fillna(0)
+
+    _, idx_nn    = nn.kneighbors(row[similarity_cols])
+    neighbor_ids = train_tabular.iloc[idx_nn[0]]["user_id"]
+    new_embedding = (
+        ref_emb[ref_emb["user_id"].isin(neighbor_ids)][emb_cols].mean().values
+    )
+    emb_df = pd.DataFrame([new_embedding], columns=emb_cols, index=row.index)
+    row    = pd.concat([row, emb_df], axis=1)
+
+    row[emb_cols] = embedding_normalizer.transform(row[emb_cols])
+
+    robust_cols = robust_scaler.feature_names_in_
+    for c in robust_cols:
+        if c not in row.columns:
+            row[c] = 0
+    row[robust_cols] = robust_scaler.transform(row[robust_cols])
+
+    if "account_age_days" in row.columns:
+        row[["account_age_days"]] = age_scaler.transform(row[["account_age_days"]])
+
+    for c in feature_list:
+        if c not in row.columns:
+            row[c] = 0
+
+    return model.predict_proba(row[feature_list])[:, 1][0]
+
+
+# ================= LIME PREDICT FUNCTION =================
+def full_pipeline_for_lime(raw_array: np.ndarray) -> np.ndarray:
+    all_probs  = []
+    bg_medians = pd.DataFrame(background_data, columns=RAW_INPUT_COLS).median()
+    for i in range(raw_array.shape[0]):
+        row = pd.DataFrame([raw_array[i]], columns=RAW_INPUT_COLS)
+        for col in binary_cols:
+            if col in row.columns:
+                row[col] = row[col].fillna(0)
+        row  = row.fillna(bg_medians)
+        prob = run_pipeline(row)
+        all_probs.append([1 - prob, prob])
+    return np.array(all_probs)
+
+
+# ================= BUILD LIME BACKGROUND =================
+def build_lime_background() -> np.ndarray:
+    bg = pd.DataFrame(index=train_tabular.index)
+    for c in RAW_INPUT_COLS:
+        bg[c] = train_tabular[c] if c in train_tabular.columns else 0
+    return bg.replace([np.inf, -np.inf], 0).fillna(0).values
+
+background_data = build_lime_background()
+
+# ================= INITIALISE LIME EXPLAINER =================
+binary_cols = ["verified", "has_description", "has_prof_url", "has_location",
+               "has_prof_img", "young_account_flag", "huge_followers_flag", "young_and_popular"]
+categorical_feature_indices = [
+    i for i, name in enumerate(RAW_INPUT_COLS) if name in binary_cols
+]
+
+explainer = lime.lime_tabular.LimeTabularExplainer(
+    training_data=background_data,
+    feature_names=RAW_INPUT_COLS,
+    class_names=["BOT", "HUMAN"],
+    categorical_features=categorical_feature_indices,
+    mode="classification",
+    discretize_continuous=True,
+    random_state=42,
+)
+
+
+# ================= LLM EXPLANATION FUNCTIONS =================
+FEATURE_DESCRIPTIONS = {
+    "followers_count":        "number of followers",
+    "friends_count":          "number of accounts followed",
+    "tweets_count":           "total tweets posted",
+    "listed_count":           "times added to Twitter lists",
+    "hashtag_count":          "total hashtags used",
+    "mentions_count":         "total mentions of other users",
+    "retweet_count":          "total retweets received",
+    "reply_count":            "total replies received",
+    "url_count":              "total URLs shared",
+    "ff_ratio":               "follower-to-following ratio",
+    "avg_hashtag":            "average hashtags per tweet",
+    "avg_mentions":           "average mentions per tweet",
+    "avg_retweet":            "average retweets per tweet",
+    "avg_reply":              "average replies per tweet",
+    "avg_url":                "average URLs per tweet",
+    "avg_user_engagement":    "average user engagement score",
+    "has_description":        "whether account has a bio description",
+    "has_prof_url":           "whether account has a profile URL",
+    "has_location":           "whether account has a location set",
+    "has_prof_img":           "whether account has a profile image",
+    "profile_completeness":   "how complete the profile is",
+    "avg_polarity":           "average sentiment polarity of tweets",
+    "avg_subjectivity":       "average subjectivity of tweets",
+    "unique_word_count":      "total unique words used across tweets",
+    "unique_word_use":        "ratio of unique words to total words",
+    "punctuation_count":      "total punctuation marks used",
+    "avg_sentence_length":    "average sentence length in tweets",
+    "punctuation_density":    "punctuation density in tweets",
+    "account_age_days":       "age of the account in days",
+    "verified":               "whether the account is verified",
+    "tweets_per_day":         "average tweets posted per day",
+    "followers_per_day":      "average follower gain per day",
+    "followers_spike":        "spike in followers relative to account age",
+    "tweet_spike":            "spike in tweets relative to account age",
+    "extreme_activity_score": "combined score of follower and tweet activity spikes",
+    "young_account_flag":     "whether account is less than 90 days old",
+    "huge_followers_flag":    "whether follower count exceeds the 95th percentile",
+    "young_and_popular":      "whether account is both new and has huge followers",
+}
+
+def _humanise_feature(raw_feature: str) -> str:
+    for key, desc in FEATURE_DESCRIPTIONS.items():
+        if raw_feature.startswith(key) or f" {key} " in raw_feature or raw_feature.endswith(key):
+            cond = raw_feature.replace(key, "").strip().lstrip("=").strip()
+            return f"{desc} ({cond})" if cond else desc
+    return raw_feature
+
+
+def build_llm_prompt(user_id: str, prediction: str, p_human: float,
+                     lime_features: list) -> str:
+    p_bot         = round(1 - p_human, 4)
+    bot_signals   = [(f, w) for f, w in lime_features if w < 0]
+    human_signals = [(f, w) for f, w in lime_features if w > 0]
+
+    bot_lines = "\n".join(
+        f"  - {_humanise_feature(f)} (influence: {abs(w):.4f})"
+        for f, w in sorted(bot_signals, key=lambda x: x[1])[:5]
+    )
+    human_lines = "\n".join(
+        f"  - {_humanise_feature(f)} (influence: {abs(w):.4f})"
+        for f, w in sorted(human_signals, key=lambda x: -x[1])[:5]
+    )
+
+    verdict      = "likely human" if prediction == "HUMAN" else "likely automated (bot)"
+    confidence   = "narrow" if 0.37 <= p_human <= 0.43 else "moderate"
+
+    return f"""You are an expert analyst writing a clear, polished report on a Twitter account's authenticity.
+
+A machine learning model analysed account {user_id} and concluded it is {verdict}, with a {confidence} margin of confidence.
+
+Evidence suggesting automated (bot) behaviour:
+{bot_lines if bot_lines else "  - None identified"}
+
+Evidence suggesting genuine human behaviour:
+{human_lines if human_lines else "  - None identified"}
+
+Write a polished 4–5 sentence paragraph that a non-technical reader could understand. Do NOT mention feature names, numbers, or model scores. Instead:
+- Open with a clear one-sentence verdict on whether this account appears human or bot.
+- Explain in plain English what behavioural patterns led to this conclusion (e.g. "the account posts at an unusually high rate", "engagement patterns look organic", "the profile appears hastily created").
+- If there are contradictory signals, acknowledge them naturally (e.g. "despite some genuine-looking engagement, several structural traits raise suspicion").
+- Close with a sentence on overall confidence level and any caveats.
+Write in a professional, journalistic tone. Complete every sentence fully."""
+
+
+def _extract_text_from_response(data: dict) -> str:
+    """
+    Safely extracts text from OpenRouter response.
+    Handles empty content, finish_reason=length, and unexpected structures.
+    """
+    try:
+        candidates = data.get("choices", [])
+        if not candidates:
+            return "[LLM returned no choices]"
+
+        choice  = candidates[0]
+        message = choice.get("message", {})
+        content = message.get("content", "")
+
+        # Warn if truncated due to token limit
+        finish_reason = choice.get("finish_reason", "")
+        if finish_reason == "length":
+            print("  ⚠️  Response hit token limit — consider increasing LLM_MAX_TOKENS further")
+
+        if content and content.strip():
+            return content.strip()
+
+        # Some models return content inside a different structure
+        if "text" in message:
+            return message["text"].strip()
+
+        return "[LLM returned empty content]"
+
+    except (KeyError, IndexError, TypeError) as e:
+        return f"[LLM parse error: {e} | raw: {str(data)[:200]}]"
+
+
+def get_llm_explanation(prompt: str) -> str:
+    """
+    Calls OpenRouter API with exponential backoff on rate-limit (429).
+    Also handles empty/malformed responses gracefully.
+    """
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type":  "application/json",
+        "HTTP-Referer":  "https://bot-detection-project",
+    }
+    payload = {
+        "model": LLM_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens":  LLM_MAX_TOKENS,
+        "temperature": LLM_TEMPERATURE,
+    }
+
+    for attempt in range(1, LLM_RETRIES + 1):
+        try:
+            resp = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=60,
+            )
+
+            if resp.status_code == 200:
+                data = resp.json()
+                text = _extract_text_from_response(data)
+
+                # If empty, print raw response so we can debug and retry
+                if text.startswith("[LLM"):
+                    print(f"  ⚠️  Empty/unexpected response (attempt {attempt}/{LLM_RETRIES}): {str(data)[:300]}")
+                    if attempt < LLM_RETRIES:
+                        time.sleep(LLM_RETRY_BASE_DELAY)
+                        continue
+                return text
+
+            elif resp.status_code == 429:
+                wait = LLM_RETRY_BASE_DELAY * (2 ** (attempt - 1))  # 10s, 20s, 40s, 80s, 160s
+                print(f"  Rate limited — waiting {wait}s before retry (attempt {attempt}/{LLM_RETRIES})")
+                time.sleep(wait)
+
+            else:
+                return f"[LLM error {resp.status_code}: {resp.text[:200]}]"
+
+        except requests.exceptions.RequestException as e:
+            return f"[LLM request failed: {e}]"
+
+    return "[LLM explanation unavailable after retries]"
+
+
+# ================= PRE-FLIGHT CHECKS =================
+dup_ids = api_df[api_df["user_id"].duplicated(keep=False)]["user_id"].unique()
+if len(dup_ids) > 0:
+    print(f"WARNING: {len(dup_ids)} duplicate user_id(s) found: {list(dup_ids)}")
+
+null_count = api_df["user_id"].isna().sum()
+if null_count > 0:
+    print(f"WARNING: {null_count} row(s) with null user_id — will be SKIPPED.")
+
+# ================= MAIN LOOP =================
+results           = []
+all_probs         = []
+lime_explanations = {}
+llm_explanations  = {}
+
+for idx in range(len(api_df)):
+
+    row = api_df.iloc[[idx]].copy()
+
+    user_id = row["user_id"].values[0]
+    if pd.isna(user_id) or str(user_id).strip() in ("", "nan"):
+        print(f"Skipping row {idx} — null/empty user_id.")
+        continue
+
+    # -------- Predict --------
+    prob  = run_pipeline(row)
+    all_probs.append(prob)
+    label = "HUMAN" if prob >= 0.39 else "BOT"
+    results.append({"user_id": user_id, "probability": prob, "prediction": label})
+
+    # -------- LIME --------
+    lime_row = row[RAW_INPUT_COLS].copy()
+    for col in binary_cols:
+        if col in lime_row.columns:
+            lime_row[col] = lime_row[col].fillna(0)
+    bg_medians    = pd.DataFrame(background_data, columns=RAW_INPUT_COLS).median()
+    lime_row      = lime_row.fillna(bg_medians)
+    lime_instance = lime_row.values[0].astype(float)
+
+    lime_exp = explainer.explain_instance(
+        data_row=lime_instance,
+        predict_fn=full_pipeline_for_lime,
+        num_features=15,
+        num_samples=300,
+        labels=(1,),
+    )
+    lime_explanations[user_id] = lime_exp
+
+    # -------- LLM Explanation --------
+    lime_feature_list        = lime_exp.as_list(label=1)
+    prompt                   = build_llm_prompt(user_id, label, prob, lime_feature_list)
+    llm_text                 = get_llm_explanation(prompt)
+    llm_explanations[user_id] = llm_text
+    time.sleep(LLM_BETWEEN_USERS_DELAY)
+
+    # -------- Console Output --------
+    print(f"\n{'='*60}")
+    print(f"User: {user_id} | Prediction: {label} | P(HUMAN)={prob:.4f}")
+    print("Top LIME features  [+ pushes toward HUMAN | - pushes toward BOT]")
+    for feat, weight in lime_feature_list:
+        direction = "HUMAN" if weight > 0 else "BOT  "
+        print(f"  [{direction}]  {weight:+.4f}  |  {feat}")
+    print(f"\n  LLM Explanation:\n  {llm_text}")
+
+
+# ================= SAVE PREDICTIONS =================
+results_df = pd.DataFrame(results)
+results_df.to_excel("batch_predictions.xlsx", index=False)
+
+print("\nBatch prediction completed. Saved to: batch_predictions.xlsx")
+print("Min prob :", min(all_probs))
+print("Max prob :", max(all_probs))
+print("Mean prob:", round(sum(all_probs) / len(all_probs), 4))
+print("Model classes:", model.classes_)
+
+# ================= SAVE LIME + LLM EXPLANATIONS =================
+lime_rows = []
+for uid, exp in lime_explanations.items():
+    prediction = next(r["prediction"] for r in results if r["user_id"] == uid)
+    prob_val   = next(r["probability"] for r in results if r["user_id"] == uid)
+    llm_text   = llm_explanations.get(uid, "")
+    for rank, (feat, weight) in enumerate(exp.as_list(label=1), start=1):
+        lime_rows.append({
+            "user_id":         uid,
+            "prediction":      prediction,
+            "p_human":         round(prob_val, 4),
+            "rank":            rank,
+            "feature":         feat,
+            "lime_weight":     round(weight, 6),
+            "pushes_toward":   "HUMAN" if weight > 0 else "BOT",
+            "llm_explanation": llm_text if rank == 1 else "",
+        })
+
+lime_df = pd.DataFrame(lime_rows)
+lime_df = lime_df.drop_duplicates(subset=["user_id", "feature"])
+lime_df = lime_df.sort_values(["user_id", "rank"]).reset_index(drop=True)
+lime_df.to_excel("lime_explanations.xlsx", index=False)
+print("LIME + LLM explanations saved to: lime_explanations.xlsx")
+
+# ================= SAVE LLM-ONLY SUMMARY =================
+llm_df = pd.DataFrame([
+    {
+        "user_id":         uid,
+        "prediction":      next(r["prediction"] for r in results if r["user_id"] == uid),
+        "p_human":         round(next(r["probability"] for r in results if r["user_id"] == uid), 4),
+        "llm_explanation": text,
+    }
+    for uid, text in llm_explanations.items()
+])
+llm_df.to_excel("llm_explanations_summary.xlsx", index=False)
+print("LLM summary saved to: llm_explanations_summary.xlsx")
+
+# ================= OPTIONAL: HTML PER USER =================
+# import os
+# os.makedirs("lime_html", exist_ok=True)
+# for uid, exp in lime_explanations.items():
+#     exp.save_to_file(f"lime_html/{uid}.html")
