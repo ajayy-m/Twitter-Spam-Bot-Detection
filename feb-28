@@ -12,7 +12,7 @@ import lime.lime_tabular
 # ⚠️  SECURITY: Use environment variable instead of hardcoding your key.
 # In PowerShell run: $env:OPENROUTER_API_KEY = "sk-or-v1-..."
 # Then the line below picks it up automatically.
-OPENROUTER_API_KEY      = "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"
+OPENROUTER_API_KEY      = "Insert_OPENROUTER_Key"
 LLM_MODEL               = "stepfun/step-3.5-flash:free"
 LLM_MAX_TOKENS          = 800   # increased to handle longer narrative explanations
 LLM_TEMPERATURE         = 0.3
