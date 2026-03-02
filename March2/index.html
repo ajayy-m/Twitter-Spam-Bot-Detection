@@ -1,0 +1,1036 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>BotScope — Twitter Account Analyser</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"/>
+<style>
+  /* ── RESET & BASE ─────────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #080c12;
+    --surface:   #0e1520;
+    --surface2:  #141d2b;
+    --border:    #1e2d42;
+    --accent:    #00c2ff;
+    --accent2:   #0077aa;
+    --human:     #00e5a0;
+    --human-dim: #003d2a;
+    --bot:       #ff4d6d;
+    --bot-dim:   #3d0011;
+    --uncertain:     #ffb340;
+    --uncertain-dim: #3d2600;
+    --text:      #c8d8e8;
+    --muted:     #4a6080;
+    --mono:      'Space Mono', monospace;
+    --sans:      'DM Sans', sans-serif;
+  }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+
+  /* ── SCANLINE OVERLAY ─────────────────────────────────────────── */
+  body::before {
+    content: '';
+    position: fixed; inset: 0; pointer-events: none; z-index: 9999;
+    background: repeating-linear-gradient(
+      0deg, transparent, transparent 2px,
+      rgba(0,0,0,0.03) 2px, rgba(0,0,0,0.03) 4px
+    );
+  }
+
+  /* ── HEADER ──────────────────────────────────────────────────── */
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 18px 40px;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(90deg, #080c12 0%, #0a1220 100%);
+    position: sticky; top: 0; z-index: 100;
+    backdrop-filter: blur(8px);
+  }
+
+  .logo {
+    font-family: var(--mono);
+    font-size: 18px;
+    color: var(--accent);
+    letter-spacing: 0.08em;
+    display: flex; align-items: center; gap: 10px;
+  }
+
+  .logo-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 10px var(--accent);
+    animation: pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%       { opacity: 0.4; transform: scale(0.7); }
+  }
+
+  .header-tag {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+  }
+
+  /* ── MAIN LAYOUT ─────────────────────────────────────────────── */
+  main {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 50px 24px 80px;
+  }
+
+  /* ── HERO SEARCH ─────────────────────────────────────────────── */
+  .hero {
+    text-align: center;
+    margin-bottom: 48px;
+  }
+
+  .hero h1 {
+    font-family: var(--mono);
+    font-size: clamp(22px, 4vw, 32px);
+    font-weight: 700;
+    color: #fff;
+    letter-spacing: -0.01em;
+    margin-bottom: 10px;
+  }
+
+  .hero h1 span { color: var(--accent); }
+
+  .hero p {
+    color: var(--muted);
+    font-size: 14px;
+    font-family: var(--mono);
+    letter-spacing: 0.04em;
+  }
+
+  /* ── SEARCH BOX ──────────────────────────────────────────────── */
+  .search-wrap {
+    position: relative;
+    margin: 32px auto 0;
+    max-width: 560px;
+  }
+
+  .search-icon {
+    position: absolute; left: 18px; top: 50%; transform: translateY(-50%);
+    color: var(--muted); pointer-events: none;
+    font-size: 16px;
+  }
+
+  #searchInput {
+    width: 100%;
+    padding: 16px 50px 16px 48px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: #fff;
+    font-family: var(--mono);
+    font-size: 14px;
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+    letter-spacing: 0.04em;
+  }
+
+  #searchInput::placeholder { color: var(--muted); }
+
+  #searchInput:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(0,194,255,0.12);
+  }
+
+  /* ── DROPDOWN ────────────────────────────────────────────────── */
+  #dropdown {
+    position: absolute; top: calc(100% + 6px); left: 0; right: 0;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    max-height: 240px;
+    overflow-y: auto;
+    z-index: 200;
+    display: none;
+  }
+
+  #dropdown.open { display: block; animation: slideDown 0.15s ease; }
+
+  @keyframes slideDown {
+    from { opacity:0; transform:translateY(-6px); }
+    to   { opacity:1; transform:translateY(0); }
+  }
+
+  .dd-item {
+    padding: 11px 18px;
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: 13px;
+    display: flex; gap: 12px; align-items: center;
+    border-bottom: 1px solid var(--border);
+    transition: background 0.12s;
+  }
+
+  .dd-item:last-child { border-bottom: none; }
+  .dd-item:hover { background: rgba(0,194,255,0.07); }
+
+  .dd-uid { color: var(--muted); font-size: 11px; }
+
+  /* ── RESULT PANEL ────────────────────────────────────────────── */
+  #resultPanel { display: none; animation: fadeUp 0.4s ease; }
+  #resultPanel.visible { display: block; }
+
+  @keyframes fadeUp {
+    from { opacity:0; transform:translateY(16px); }
+    to   { opacity:1; transform:translateY(0); }
+  }
+
+  /* ── VERDICT CARD ────────────────────────────────────────────── */
+  .verdict-card {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    margin-bottom: 24px;
+  }
+
+  .verdict-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 20px 28px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .verdict-header.human     { background: linear-gradient(90deg, #001f15, #0e1520); border-left: 3px solid var(--human); }
+  .verdict-header.bot       { background: linear-gradient(90deg, #1f0008, #0e1520); border-left: 3px solid var(--bot); }
+  .verdict-header.uncertain { background: linear-gradient(90deg, #1f1000, #0e1520); border-left: 3px solid var(--uncertain); }
+
+  .verdict-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+
+  .verdict-name {
+    font-size: 20px;
+    font-weight: 600;
+    color: #fff;
+  }
+
+  .verdict-id {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+
+  .verdict-badge {
+    font-family: var(--mono);
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    padding: 8px 20px;
+    border-radius: 4px;
+  }
+
+  .verdict-badge.human     { color: var(--human);     background: var(--human-dim); }
+  .verdict-badge.bot       { color: var(--bot);       background: var(--bot-dim); }
+  .verdict-badge.uncertain { color: var(--uncertain); background: var(--uncertain-dim); }
+
+  /* ── PROBABILITY BAR ─────────────────────────────────────────── */
+  .prob-section {
+    padding: 22px 28px;
+  }
+
+  .prob-section label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--muted);
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 10px;
+  }
+
+  .prob-track-wrap {
+    position: relative;
+    height: 10px;
+    background: var(--border);
+    border-radius: 5px;
+    margin-bottom: 10px;
+  }
+
+  .prob-bar-fill {
+    height: 100%;
+    border-radius: 5px;
+    transition: width 0.9s cubic-bezier(0.16,1,0.3,1);
+  }
+
+  .prob-bar-fill.human { background: linear-gradient(90deg, #00e5a0, #00b37a); }
+  .prob-bar-fill.bot   { background: linear-gradient(90deg, #ff4d6d, #cc2244); }
+
+  /* threshold marker */
+  .threshold-marker {
+    position: absolute;
+    top: -5px;
+    width: 2px;
+    height: 20px;
+    background: #fff;
+    opacity: 0.6;
+    border-radius: 1px;
+    transform: translateX(-50%);
+  }
+
+  .threshold-label {
+    position: absolute;
+    top: 18px;
+    font-family: var(--mono);
+    font-size: 9px;
+    color: var(--muted);
+    transform: translateX(-50%);
+    white-space: nowrap;
+  }
+
+  .prob-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 14px;
+  }
+
+  .prob-val {
+    font-family: var(--mono);
+    font-size: 24px;
+    font-weight: 700;
+    color: #fff;
+  }
+
+  .prob-legend {
+    display: flex;
+    gap: 16px;
+  }
+
+  .prob-legend-item {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .prob-legend-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  /* ── TABS ────────────────────────────────────────────────────── */
+  .tabs {
+    display: flex;
+    gap: 0;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 24px;
+  }
+
+  .tab-btn {
+    padding: 12px 22px;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: color 0.2s, border-color 0.2s;
+    margin-bottom: -1px;
+  }
+
+  .tab-btn:hover { color: var(--text); }
+
+  .tab-btn.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; animation: fadeUp 0.3s ease; }
+
+  /* ── LLM SUMMARY ─────────────────────────────────────────────── */
+  .llm-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 28px 32px;
+    position: relative;
+  }
+
+  .llm-box::before {
+    content: '"';
+    position: absolute; top: 12px; left: 20px;
+    font-size: 60px;
+    color: rgba(0,194,255,0.08);
+    font-family: Georgia, serif;
+    line-height: 1;
+  }
+
+  .llm-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 14px;
+    display: flex; align-items: center; gap: 8px;
+  }
+
+  .llm-label::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+
+  #llmText {
+    font-size: 15px;
+    line-height: 1.75;
+    color: var(--text);
+    font-weight: 300;
+  }
+
+  /* ── LIME TABLE ──────────────────────────────────────────────── */
+  .lime-table-wrap {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+
+  thead th {
+    padding: 12px 16px;
+    text-align: left;
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--muted);
+    background: var(--surface2);
+    border-bottom: 1px solid var(--border);
+  }
+
+  tbody tr {
+    border-bottom: 1px solid var(--border);
+    transition: background 0.1s;
+  }
+
+  tbody tr:last-child { border-bottom: none; }
+  tbody tr:hover { background: rgba(255,255,255,0.02); }
+
+  td { padding: 10px 16px; vertical-align: middle; }
+
+  .rank-cell { color: var(--muted); width: 40px; }
+
+  .feat-cell { color: var(--text); max-width: 300px; }
+
+  .dir-badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+  }
+
+  .dir-badge.human { background: var(--human-dim); color: var(--human); }
+  .dir-badge.bot   { background: var(--bot-dim);   color: var(--bot); }
+
+  .weight-cell { color: #fff; text-align: right; }
+
+  /* ── WEIGHT BAR ──────────────────────────────────────────────── */
+  .w-bar-wrap {
+    display: flex; align-items: center; gap: 8px;
+    justify-content: flex-end;
+  }
+
+  .w-bar {
+    height: 4px;
+    border-radius: 2px;
+    min-width: 4px;
+    max-width: 100px;
+  }
+
+  .w-bar.human { background: var(--human); }
+  .w-bar.bot   { background: var(--bot); }
+
+  /* ── HOW IT WORKS ─────────────────────────────────────────────── */
+  .how-section { margin-bottom: 36px; }
+
+  .how-section h3 {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--accent);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    margin-bottom: 14px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .how-section p, .how-section li {
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.75;
+    margin-bottom: 10px;
+  }
+
+  .how-section ul { padding-left: 20px; }
+  .how-section li::marker { color: var(--accent); }
+
+  .pipeline-steps {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 14px;
+    margin: 18px 0;
+  }
+
+  .step {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 18px 16px;
+    text-align: center;
+    position: relative;
+  }
+
+  .step-num {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--accent);
+    letter-spacing: 0.15em;
+    margin-bottom: 8px;
+  }
+
+  .step-title {
+    font-weight: 600;
+    font-size: 13px;
+    color: #fff;
+    margin-bottom: 6px;
+  }
+
+  .step-desc {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+
+  .step::after {
+    content: '→';
+    position: absolute; right: -10px; top: 50%; transform: translateY(-50%);
+    color: var(--border);
+    font-size: 14px;
+    z-index: 1;
+  }
+
+  .step:last-child::after { display: none; }
+
+  .metric-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin: 16px 0;
+  }
+
+  .metric-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 16px;
+    text-align: center;
+  }
+
+  .metric-val {
+    font-family: var(--mono);
+    font-size: 26px;
+    font-weight: 700;
+    color: var(--accent);
+    display: block;
+  }
+
+  .metric-label {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+
+  /* ── LOADING ─────────────────────────────────────────────────── */
+  #loadingState {
+    display: none;
+    text-align: center;
+    padding: 60px 0;
+  }
+
+  #loadingState.visible { display: block; }
+
+  .spinner {
+    width: 40px; height: 40px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    margin: 0 auto 20px;
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .loading-steps { display: flex; flex-direction: column; gap: 8px; margin-top: 24px; }
+
+  .lstep {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    display: flex; align-items: center; gap: 10px;
+    justify-content: center;
+    transition: color 0.3s;
+  }
+
+  .lstep.done { color: var(--human); }
+  .lstep.active { color: var(--accent); }
+
+  .lstep-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    flex-shrink: 0;
+  }
+
+  /* ── ERROR ───────────────────────────────────────────────────── */
+  .error-box {
+    background: var(--bot-dim);
+    border: 1px solid var(--bot);
+    border-radius: 6px;
+    padding: 16px 20px;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--bot);
+    display: none;
+  }
+
+  .error-box.visible { display: block; }
+
+  /* ── SCROLLBAR ───────────────────────────────────────────────── */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-dot"></div>
+    BOTSCOPE
+  </div>
+  <div class="header-tag">Twitter Account Intelligence</div>
+</header>
+
+<main>
+
+  <!-- HERO + SEARCH -->
+  <div class="hero">
+    <h1>Detect. Analyse. <span>Explain.</span></h1>
+    <p>// ML-powered bot detection with LIME explainability</p>
+
+    <div class="search-wrap">
+      <span class="search-icon">⌕</span>
+      <input
+        id="searchInput"
+        type="text"
+        placeholder="Search by username or user ID..."
+        autocomplete="off"
+        spellcheck="false"
+      />
+      <div id="dropdown"></div>
+    </div>
+  </div>
+
+  <!-- ERROR -->
+  <div class="error-box" id="errorBox"></div>
+
+  <!-- LOADING -->
+  <div id="loadingState">
+    <div class="spinner"></div>
+    <div style="font-family:var(--mono);font-size:13px;color:var(--muted);">Analysing account...</div>
+    <div class="loading-steps">
+      <div class="lstep" id="ls1"><div class="lstep-dot"></div>Running classification pipeline</div>
+      <div class="lstep" id="ls2"><div class="lstep-dot"></div>Generating LIME explanations</div>
+      <div class="lstep" id="ls3"><div class="lstep-dot"></div>Composing LLM summary</div>
+    </div>
+  </div>
+
+  <!-- RESULT -->
+  <div id="resultPanel">
+
+    <!-- VERDICT CARD -->
+    <div class="verdict-card" id="verdictCard">
+      <div class="verdict-header" id="verdictHeader">
+        <div>
+          <div class="verdict-label">Account</div>
+          <div class="verdict-name" id="vName">—</div>
+          <div class="verdict-id" id="vId">—</div>
+        </div>
+        <div class="verdict-badge" id="vBadge">—</div>
+      </div>
+      <div class="prob-section">
+        <label>
+          <span>P(Human) — Classification Confidence</span>
+          <span id="probHuman" style="color:#fff">—</span>
+        </label>
+        <div class="prob-track-wrap">
+          <div class="prob-bar-fill" id="barHuman" style="width:0%"></div>
+          <div class="threshold-marker" style="left:42.37%"></div>
+          <div class="threshold-label" style="left:42.37%">threshold 0.4237</div>
+        </div>
+        <div class="prob-footer">
+          <div class="prob-val" id="probVerdict">—</div>
+          <div class="prob-legend">
+            <div class="prob-legend-item">
+              <div class="prob-legend-dot" style="background:var(--bot)"></div>BOT zone
+            </div>
+            <div class="prob-legend-item">
+              <div class="prob-legend-dot" style="background:var(--human)"></div>HUMAN zone
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TABS -->
+    <div class="tabs">
+      <button class="tab-btn active" onclick="switchTab('analysis', this)">Analysis</button>
+      <button class="tab-btn" onclick="switchTab('lime', this)">LIME Evidence</button>
+      <button class="tab-btn" onclick="switchTab('how', this)">How It Works</button>
+    </div>
+
+    <!-- TAB: ANALYSIS (LLM Summary) -->
+    <div class="tab-panel active" id="tab-analysis">
+      <div class="llm-box">
+        <div class="llm-label">AI Analyst Summary</div>
+        <p id="llmText">—</p>
+      </div>
+    </div>
+
+    <!-- TAB: LIME EVIDENCE -->
+    <div class="tab-panel" id="tab-lime">
+      <div class="lime-table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Feature Condition</th>
+              <th>Signal</th>
+              <th style="text-align:right">Influence</th>
+            </tr>
+          </thead>
+          <tbody id="limeTableBody">
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- TAB: HOW IT WORKS -->
+    <div class="tab-panel" id="tab-how">
+
+      <div class="how-section">
+        <h3>Overview</h3>
+        <p>BotScope uses a three-stage pipeline to classify Twitter accounts and generate human-readable explanations. Each account is evaluated using behavioural signals derived from publicly available profile and activity data.</p>
+      </div>
+
+      <div class="how-section">
+        <h3>Classification Pipeline</h3>
+        <div class="pipeline-steps">
+          <div class="step">
+            <div class="step-num">01</div>
+            <div class="step-title">Feature Engineering</div>
+            <div class="step-desc">Raw profile stats transformed into 30+ behavioural signals (tweets/day, follower spikes, engagement ratios)</div>
+          </div>
+          <div class="step">
+            <div class="step-num">02</div>
+            <div class="step-title">Graph Embedding</div>
+            <div class="step-desc">k-NN lookup finds similar training accounts; their node embeddings are averaged to create a 64-dim representation</div>
+          </div>
+          <div class="step">
+            <div class="step-num">03</div>
+            <div class="step-title">Random Forest</div>
+            <div class="step-desc">Scaled features + embeddings passed to a Random Forest classifier returning P(Human) and P(Bot)</div>
+          </div>
+          <div class="step">
+            <div class="step-num">04</div>
+            <div class="step-title">LIME</div>
+            <div class="step-desc">Local surrogate model identifies which features most influenced this specific prediction</div>
+          </div>
+          <div class="step">
+            <div class="step-num">05</div>
+            <div class="step-title">LLM Summary</div>
+            <div class="step-desc">LIME evidence translated into a plain-English narrative by a language model</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="how-section">
+        <h3>Model Performance</h3>
+        <div class="metric-grid">
+          <div class="metric-card">
+            <span class="metric-val">~92%</span>
+            <div class="metric-label">Accuracy</div>
+          </div>
+          <div class="metric-card">
+            <span class="metric-val">0.39</span>
+            <div class="metric-label">Decision Threshold<br><span style="font-size:10px;color:var(--muted)">P(Human) ≥ 0.39 → HUMAN</span></div>
+          </div>
+          <div class="metric-card">
+            <span class="metric-val">64-d</span>
+            <div class="metric-label">Graph Embedding Dims</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="how-section">
+        <h3>Key Bot Signals</h3>
+        <ul>
+          <li><strong>Follower spikes</strong> — unusually high follower count relative to account age or following count</li>
+          <li><strong>Low engagement diversity</strong> — accounts that post heavily but receive little genuine interaction</li>
+          <li><strong>Hashtag overuse</strong> — high average hashtags per tweet is a common automated posting pattern</li>
+          <li><strong>Profile completeness</strong> — paradoxically, some bots have fully completed profiles to appear legitimate</li>
+          <li><strong>Mention patterns</strong> — atypical mention frequency (too high or too low) relative to activity level</li>
+        </ul>
+      </div>
+
+      <div class="how-section">
+        <h3>Interpreting LIME Weights</h3>
+        <p>LIME (Local Interpretable Model-agnostic Explanations) perturbs the input features and observes how the model's prediction changes. Each weight represents how much that feature condition shifted the model toward Human (positive) or Bot (negative) for this specific account. Weights are locally valid — they explain this prediction only, not the model globally.</p>
+      </div>
+
+      <div class="how-section">
+        <h3>Limitations</h3>
+        <ul>
+          <li>The model was trained on a fixed dataset; adversarial bots designed to mimic human patterns may evade detection.</li>
+          <li>The 0.39 threshold means borderline accounts (0.36–0.43 range) carry significant uncertainty.</li>
+          <li>Real-time classification is not yet integrated — current data is sourced from a static API file.</li>
+          <li>LLM summaries are generated by a third-party model and may occasionally misinterpret nuanced signals.</li>
+        </ul>
+      </div>
+
+    </div><!-- end tab-how -->
+
+  </div><!-- end resultPanel -->
+
+</main>
+
+<script>
+const API = 'http://localhost:5000/api';
+let allUsers = [];
+
+// ── LOAD USER LIST ───────────────────────────────────────────────
+async function loadUsers() {
+  try {
+    const r = await fetch(`${API}/users`);
+    allUsers = await r.json();
+  } catch(e) {
+    showError('Cannot connect to backend. Make sure app.py is running on port 5000.');
+  }
+}
+loadUsers();
+
+// ── SEARCH / DROPDOWN ────────────────────────────────────────────
+const input    = document.getElementById('searchInput');
+const dropdown = document.getElementById('dropdown');
+
+input.addEventListener('input', () => {
+  const q = input.value.trim().toLowerCase();
+  if (!q) { dropdown.classList.remove('open'); return; }
+
+  const matches = allUsers.filter(u =>
+    (u.user_name && u.user_name.toLowerCase().includes(q)) ||
+    u.user_id.includes(q)
+  ).slice(0, 8);
+
+  if (!matches.length) { dropdown.classList.remove('open'); return; }
+
+  dropdown.innerHTML = matches.map(u => `
+    <div class="dd-item" onclick="selectUser('${u.user_id}', '${u.user_name || u.user_id}')">
+      <span>${u.user_name || '—'}</span>
+      <span class="dd-uid">${u.user_id}</span>
+    </div>
+  `).join('');
+  dropdown.classList.add('open');
+});
+
+document.addEventListener('click', e => {
+  if (!e.target.closest('.search-wrap')) dropdown.classList.remove('open');
+});
+
+input.addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    const q = input.value.trim();
+    if (q) { dropdown.classList.remove('open'); analyse(q); }
+  }
+});
+
+function selectUser(uid, name) {
+  input.value = name;
+  dropdown.classList.remove('open');
+  analyse(uid);
+}
+
+// ── ANALYSE ──────────────────────────────────────────────────────
+async function analyse(userId) {
+  showError('');
+  showLoading(true);
+  hideResult();
+
+  setLoadingStep(1);
+  await delay(400);
+
+  try {
+    const r    = await fetch(`${API}/analyse/${encodeURIComponent(userId)}`);
+    const data = await r.json();
+
+    if (data.error) { showError(data.error); showLoading(false); return; }
+
+    setLoadingStep(2);
+    await delay(300);
+    setLoadingStep(3);
+    await delay(200);
+
+    showLoading(false);
+    renderResult(data);
+
+  } catch(e) {
+    showError('Analysis failed. Is the backend running? (' + e.message + ')');
+    showLoading(false);
+  }
+}
+
+// ── RENDER RESULT ────────────────────────────────────────────────
+function renderResult(d) {
+  const cls = d.prediction === 'HUMAN' ? 'human' : 'bot';
+
+  // Verdict header
+  document.getElementById('verdictHeader').className = `verdict-header ${cls}`;
+  document.getElementById('vName').textContent = d.user_name || d.user_id;
+  document.getElementById('vId').textContent   = `ID: ${d.user_id}`;
+  const badge = document.getElementById('vBadge');
+  badge.textContent  = d.prediction;
+  badge.className    = `verdict-badge ${cls}`;
+
+  // Single probability bar
+  const ph = Math.round(d.p_human * 100);
+  const THRESHOLD = 42.37;
+  const barEl = document.getElementById('barHuman');
+  barEl.className = `prob-bar-fill ${cls}`;
+  document.getElementById('probHuman').textContent = `${ph}%`;
+  document.getElementById('probVerdict').textContent =
+    d.p_human >= 0.4237
+      ? `${ph}% — clears threshold → HUMAN`
+      : `${ph}% — below threshold → BOT`;
+  document.getElementById('probVerdict').style.color =
+    d.p_human >= 0.4237 ? 'var(--human)' : 'var(--bot)';
+  setTimeout(() => { barEl.style.width = `${ph}%`; }, 50);
+
+  // LLM summary
+  document.getElementById('llmText').textContent = d.llm_explanation || '—';
+
+  // LIME table
+  const maxW = Math.max(...d.lime_features.map(f => Math.abs(f.weight)));
+  const tbody = document.getElementById('limeTableBody');
+  tbody.innerHTML = d.lime_features.map(f => {
+    const dc  = f.direction.toLowerCase();
+    const barW = Math.round((Math.abs(f.weight) / maxW) * 90);
+    const sign = f.weight > 0 ? '+' : '−';
+    return `
+      <tr>
+        <td class="rank-cell">${f.rank}</td>
+        <td class="feat-cell">${f.feature}</td>
+        <td><span class="dir-badge ${dc}">${f.direction}</span></td>
+        <td class="weight-cell">
+          <div class="w-bar-wrap">
+            <span>${sign}${Math.abs(f.weight).toFixed(4)}</span>
+            <div class="w-bar ${dc}" style="width:${barW}px"></div>
+          </div>
+        </td>
+      </tr>`;
+  }).join('');
+
+  // Switch to analysis tab
+  switchTab('analysis', document.querySelector('.tab-btn'));
+
+  document.getElementById('resultPanel').classList.add('visible');
+}
+
+// ── TAB SWITCHING ─────────────────────────────────────────────────
+function switchTab(name, btn) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById(`tab-${name}`).classList.add('active');
+}
+
+// ── UI HELPERS ────────────────────────────────────────────────────
+function showLoading(on) {
+  const el = document.getElementById('loadingState');
+  if (on) {
+    el.classList.add('visible');
+    ['ls1','ls2','ls3'].forEach(id => {
+      document.getElementById(id).className = 'lstep';
+    });
+  } else {
+    el.classList.remove('visible');
+  }
+}
+
+function setLoadingStep(n) {
+  for (let i = 1; i <= 3; i++) {
+    const el = document.getElementById(`ls${i}`);
+    if (i < n)  el.className = 'lstep done';
+    if (i === n) el.className = 'lstep active';
+    if (i > n)  el.className = 'lstep';
+  }
+}
+
+function hideResult() {
+  document.getElementById('resultPanel').classList.remove('visible');
+  document.getElementById('barHuman').style.width = '0%';
+}
+
+function showError(msg) {
+  const el = document.getElementById('errorBox');
+  if (msg) { el.textContent = msg; el.classList.add('visible'); }
+  else      { el.classList.remove('visible'); }
+}
+
+function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+</script>
+</body>
+</html>
